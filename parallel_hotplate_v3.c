@@ -5,126 +5,100 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <float.h>
+
+#define SIZE 1024
+#define ERROR 0.1f
 
 double get_seconds();
 void initialize(int size, float plate[size][size]);
 void initialize_test_cells(int size, int test[size][size]);
 void set_static_cells(int size, float plate[size][size]);
+void swap(float** current, float** next);
+void next_iteration(int size, float current[size][size], float next[size][size]);
+int has_converged(int size, float current[size][size], float error, int test[size][size]);
 void print_matrix(int size, float plate[size][size]);
 int count_cells_by_degrees(int size, float plate[size][size], float temp);
 void compute(int size, float* current, float* next, int* test, float error, int* iterations, int* cell_count_gt_50_degrees);
 
 int main(int argc, char* argv[])
 {
-    int r;
-    int repetitions = 10;
-    double total_time = 0; // used to eventually calculate an average time
-    double fastest_time = FLT_MAX;
+    // get start time
+    double start_time = get_seconds();
     
-    for(r = 0; r < repetitions; r++)
+    int iteration_count = 0;
+    int cell_count_gt_50_degrees = 0;
+    
+    // allocate memory to matrices
+    float* current_plate = malloc(SIZE*SIZE*sizeof(float));
+    float* next_plate = malloc(SIZE*SIZE*sizeof(float));
+    int* test = malloc(SIZE*SIZE*sizeof(int));
+    
+    // check for bad allocation
+    if(current_plate == 0 || next_plate == 0)
     {
-        // get start time
-        double start_time = get_seconds();
-        
-        // define counters
-        int iteration_count = 0;
-        int cell_count_gt_50_degrees = 0;
-        
-        // define sizes
-        const int size = 1024;
-        const float error = 0.1f;
-        
-        // allocate memory to matrices
-        float* current_plate = malloc(size*size*sizeof(float));
-        float* next_plate = malloc(size*size*sizeof(float));
-        int* test = malloc(size*size*sizeof(int));
-        
-        // check for bad allocation
-        if(current_plate == 0 || next_plate == 0)
-        {
-            printf("Bad allocation.\n");
-            return 1;
-        }
-        
-        // initialize the matrices
-        initialize(size, (float(*) []) current_plate);
-        initialize(size, (float(*) []) next_plate);
-        initialize_test_cells(size, (int(*) []) test);
-        
-        // perform the computation
-        compute(size, current_plate, next_plate, test, error, &iteration_count, &cell_count_gt_50_degrees);
-        
-        // free the matrices
-        free(current_plate);
-        free(next_plate);
-        free(test);
-        
-        // get stop time
-        double end_time = get_seconds();
-        double time_interval = end_time - start_time;
-        
-        // report convergence and time
-        printf("Iterations: %d\n", iteration_count);
-        printf("Cells with >= 50.0 degrees: %d\n", cell_count_gt_50_degrees);
-        printf("%d %f\n", omp_get_max_threads(), time_interval); // number_of_threads time_to_execute
-        
-        fflush(stdout);
-        
-        total_time += time_interval;
-        
-        if(time_interval < fastest_time)
-        {
-            fastest_time = time_interval;
-        }
+        printf("Bad allocation.\n");
+        return 1;
     }
     
-    printf("Average Time: %f\n", total_time/repetitions);
-    printf("Fastest Time: %f\n", fastest_time);
+    // initialize the matrices
+    initialize(SIZE, (float(*) [SIZE]) current_plate);
+    initialize(SIZE, (float(*) [SIZE]) next_plate);
+    initialize_test_cells(SIZE, (int(*) [SIZE]) test);
+    
+    compute(SIZE, current_plate, next_plate, test, ERROR, &iteration_count, &cell_count_gt_50_degrees);
+    
+    // free the matrices
+    free(current_plate);
+    free(next_plate);
+    free(test);
+    
+    // get stop time
+    double end_time = get_seconds();
+    double total_time = end_time - start_time;
+    
+    // report convergence and time
+    printf("Iterations: %d\n", iteration_count);
+    printf("Time: %f\n", total_time);
+    printf("Cells with >= 50.0 degrees: %d\n", cell_count_gt_50_degrees);
+    fflush(stdout);
     
     return 0;
 }
 
 void compute(int size, float* current, float* next, int* test, float error, int* iterations, int* cell_count_gt_50_degrees)
-{    
+{
     (*iterations) = 0;
     
     int keep_going = 1;
     
     const int MAX_ITERATIONS = 500;  // a safety while testing
     
-    int* line_test = malloc(size*sizeof(int));
-    
-    int i;
-    for(i = 0; i < size; i++)
-    {
-        line_test[i] = 0;
-    }
-    
     #pragma omp parallel shared(keep_going, iterations)
     {
+        int thread_keep_going;
+        
         unsigned int it, row, col;
         
         // loop to completion
         for(it = 0; it < MAX_ITERATIONS && keep_going; it++)
         {
-            // calculate the next iteration
-#pragma omp for schedule(dynamic, 64)
-            for(row = 1; row < size - 1; row++)
+            thread_keep_going = 1;
+            
+            if(thread_keep_going)
             {
-                if(!line_test[row])
+                // calculate the next iteration
+#pragma omp for schedule(dynamic, 64)
+                for(row = 1; row < size - 1; row++)
                 {
                     float* top = (float*)(current + (row + 1)*size);
                     float* curr = (float*)current + row*size;
                     float* bottom = (float*)current + (row - 1)*size;
                     for(col = 1; col < size - 1; col++)
                     {
-                        if(!(*(test + row*size + col)))
-                            (*(next + row*size + col)) = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
+                        (*(next + row*size + col)) = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
                     }
                 }
             }
-            
 #pragma omp barrier
 #pragma omp master
             {
@@ -171,9 +145,7 @@ void compute(int size, float* current, float* next, int* test, float error, int*
         }
     }
     
-    (*cell_count_gt_50_degrees) = count_cells_by_degrees(size, (float(*) []) current, 50.0f);
-    
-    free(line_test);
+    (*cell_count_gt_50_degrees) = count_cells_by_degrees(SIZE, (float(*) []) current, 50.0f);
     
     return;
 }

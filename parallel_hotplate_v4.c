@@ -18,8 +18,8 @@ void compute(int size, float* current, float* next, int* test, float error, int*
 int main(int argc, char* argv[])
 {
     int r;
-    int repetitions = 10;
-    double total_time = 0; // used to eventually calculate an average time
+    int repetitions = 1;
+    double total_time = 0;
     double fastest_time = FLT_MAX;
     
     for(r = 0; r < repetitions; r++)
@@ -86,20 +86,12 @@ int main(int argc, char* argv[])
 }
 
 void compute(int size, float* current, float* next, int* test, float error, int* iterations, int* cell_count_gt_50_degrees)
-{    
+{
     (*iterations) = 0;
     
     int keep_going = 1;
     
     const int MAX_ITERATIONS = 500;  // a safety while testing
-    
-    int* line_test = malloc(size*sizeof(int));
-    
-    int i;
-    for(i = 0; i < size; i++)
-    {
-        line_test[i] = 0;
-    }
     
     #pragma omp parallel shared(keep_going, iterations)
     {
@@ -108,20 +100,17 @@ void compute(int size, float* current, float* next, int* test, float error, int*
         // loop to completion
         for(it = 0; it < MAX_ITERATIONS && keep_going; it++)
         {
-            // calculate the next iteration
+            
+                // calculate the next iteration
 #pragma omp for schedule(dynamic, 64)
             for(row = 1; row < size - 1; row++)
             {
-                if(!line_test[row])
+                float* top = (float*)(current + (row + 1)*size);
+                float* curr = (float*)current + row*size;
+                float* bottom = (float*)current + (row - 1)*size;
+                for(col = 1; col < size - 1; col++)
                 {
-                    float* top = (float*)(current + (row + 1)*size);
-                    float* curr = (float*)current + row*size;
-                    float* bottom = (float*)current + (row - 1)*size;
-                    for(col = 1; col < size - 1; col++)
-                    {
-                        if(!(*(test + row*size + col)))
-                            (*(next + row*size + col)) = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
-                    }
+                    (*(next + row*size + col)) = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
                 }
             }
             
@@ -172,8 +161,6 @@ void compute(int size, float* current, float* next, int* test, float error, int*
     }
     
     (*cell_count_gt_50_degrees) = count_cells_by_degrees(size, (float(*) []) current, 50.0f);
-    
-    free(line_test);
     
     return;
 }

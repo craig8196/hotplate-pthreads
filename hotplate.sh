@@ -1,17 +1,8 @@
 #!/bin/bash
 
-echo "Stuff"
-export OMP_NUM_THREADS=1
-./hot
+thread_nums=(1 2 4 8 16)
 
-export OMP_NUM_THREADS=2
-./hot
-
-export OMP_NUM_THREADS=4
-./hot
-
-export OMP_NUM_THREADS=8
-./hot
-
-export OMP_NUM_THREADS=16
-./hot
+for i in ${thread_nums[@]}; do
+    export OMP_NUM_THREADS=$i
+    ./hot
+done
