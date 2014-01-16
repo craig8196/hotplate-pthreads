@@ -18,7 +18,7 @@ void compute(int size, float* current, float* next, int* test, float error, int*
 int main(int argc, char* argv[])
 {
     int r;
-    int repetitions = 1;
+    int repetitions = 10;
     double total_time = 0;
     double fastest_time = FLT_MAX;
     
@@ -117,6 +117,9 @@ void compute(int size, float* current, float* next, int* test, float error, int*
 #pragma omp barrier
 #pragma omp master
             {
+                /*if((*iterations)%1 == 0)
+                    print_matrix(size, (float(*)[])current); //*/
+                
                 set_static_cells(size, (float(*)[])next);
                 
                 float* temp = current;

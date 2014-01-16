@@ -7,6 +7,7 @@
 #include <math.h>
 #include <float.h>
 
+
 double get_seconds();
 void initialize(int size, float plate[size][size]);
 void initialize_test_cells(int size, int test[size][size]);
@@ -15,10 +16,11 @@ void print_matrix(int size, float plate[size][size]);
 int count_cells_by_degrees(int size, float plate[size][size], float temp);
 void compute(int size, float* current, float* next, int* test, float error, int* iterations, int* cell_count_gt_50_degrees);
 
+
 int main(int argc, char* argv[])
 {
     int r;
-    int repetitions = 10;
+    int repetitions = 1;
     double total_time = 0; // used to eventually calculate an average time
     double fastest_time = FLT_MAX;
     
@@ -93,34 +95,64 @@ void compute(int size, float* current, float* next, int* test, float error, int*
     
     const int MAX_ITERATIONS = 500;  // a safety while testing
     
-    int* line_test = malloc(size*sizeof(int));
-    
-    int i;
-    for(i = 0; i < size; i++)
-    {
-        line_test[i] = 0;
-    }
-    
-    #pragma omp parallel shared(keep_going, iterations)
+#pragma omp parallel shared(keep_going)
     {
         unsigned int it, row, col;
+        
+        int number_of_threads = omp_get_num_threads();
+        int my_thread_num = omp_get_thread_num();
+        
+        int my_size = size/number_of_threads;
+        int start = my_size*my_thread_num;
+        int end = start + my_size;
+        
+        if(start < 1)
+            start = 1;
+        if(end > size - 1 || my_thread_num == number_of_threads - 1)
+            end = size - 1;
         
         // loop to completion
         for(it = 0; it < MAX_ITERATIONS && keep_going; it++)
         {
             // calculate the next iteration
-#pragma omp for schedule(dynamic, 64)
-            for(row = 1; row < size - 1; row++)
+            for(row = start; row < end; row ++)
             {
-                if(!line_test[row])
+                float* top = (float*)(current + (row + 1)*size);
+                float* curr = (float*)(current + row*size);
+                float* bottom = (float*)(current + (row - 1)*size);
+                for(col = 1; col < size - 1; col++)
                 {
-                    float* top = (float*)(current + (row + 1)*size);
-                    float* curr = (float*)current + row*size;
-                    float* bottom = (float*)current + (row - 1)*size;
-                    for(col = 1; col < size - 1; col++)
+                    (*(next + row*size + col)) = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
+                }
+            }
+            
+#pragma omp barrier
+#pragma omp reduction(||: keep_going)
+            {
+                keep_going = 0;
+                for(row = start; row < end; row++)
+                {
+                    if(!keep_going)
                     {
-                        if(!(*(test + row*size + col)))
-                            (*(next + row*size + col)) = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
+                        for(col = 1; col < size - 1; col++)
+                        {
+                            if(!(*(test + row*size + col)))
+                            {
+                                float average = ((*(current + (row - 1)*size + col)) +
+                                                 (*(current + (row + 1)*size + col)) +
+                                                 (*(current + (row)*size + col + 1)) +
+                                                 (*(current + (row)*size + col - 1)))/4.0f;
+                                           
+                                
+                                float difference = fabsf((*(current + (row)*size + col)) - average);
+                                 
+                                if(difference >= error)
+                                {
+                                    keep_going = 1;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -128,52 +160,32 @@ void compute(int size, float* current, float* next, int* test, float error, int*
 #pragma omp barrier
 #pragma omp master
             {
+                if((*iterations)%50 == 0)
+                {
+                    printf("Keep going: %d\n", keep_going);
+                    print_matrix(size, (float(*)[])current); //*/
+                }
+                
+                // reset certain cells
                 set_static_cells(size, (float(*)[])next);
                 
+                // swap matrices
                 float* temp = current;
                 current = next;
                 next = temp;
-        
-                (*iterations)++;
-                keep_going = 0;
-            }
-#pragma omp barrier
-#pragma omp for reduction(||: keep_going) schedule(dynamic, 64)
-            for(row = 1; row < size - 1; row++)
-            {
-                if(!keep_going)
+                
+                // increment the iterations
+                if(keep_going)
                 {
-                    for(col = 1; col < size - 1; col++)
-                    {
-                        if(!(*(test + row*size + col)))
-                        {
-                            float average = ((*(current + (row - 1)*size + col)) +
-                                             (*(current + (row + 1)*size + col)) +
-                                             (*(current + (row)*size + col + 1)) +
-                                             (*(current + (row)*size + col - 1)))/4.0f;
-                                       
-                            
-                            float difference = fabsf((*(current + (row)*size + col)) - average);
-                            
-                            /*printf("Avg: %f", average);
-                            printf("Val: %f", plate[row][col]);
-                            printf("Dif: %f", difference);*/
-                                
-                            if(difference >= error)
-                            {
-                                keep_going = 1;
-                                break;
-                            }
-                        }
-                    }
+                    (*iterations)++;
                 }
+                //printf("Iter: %d\n", (*iterations));
             }
         }
+#pragma omp barrier
     }
     
-    (*cell_count_gt_50_degrees) = count_cells_by_degrees(size, (float(*) []) current, 50.0f);
-    
-    free(line_test);
+    (*cell_count_gt_50_degrees) = count_cells_by_degrees(size, (float(*) []) next, 50.0f);
     
     return;
 }
