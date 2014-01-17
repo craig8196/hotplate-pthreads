@@ -68,77 +68,95 @@ int main(int argc, char* argv[])
 
 void hotplate(int size, float error, int* iterations, int* cell_count_gt_50_degrees)
 {
+    float** matrices;
+    
     // allocate memory to matrices
-    float* current_plate = malloc(size*size*sizeof(float));
-    float* next_plate = malloc(size*size*sizeof(float));
     char* test = malloc(size*size*sizeof(char));
     
     // initialize the matrices
-    initialize(size, (float(*) []) current_plate);
-    initialize(size, (float(*) []) next_plate);
     initialize_test_cells(size, (char(*) []) test);
     
     (*iterations) = 0;
     
     int keep_going = 1;
+    int* keep_goings;
     
     const int MAX_ITERATIONS = 500;  // a safety while testing
     
-    unsigned int row;
-    
-#pragma omp parallel shared(keep_going, cell_count_gt_50_degrees, test, current_plate, next_plate, iterations)
+    #pragma omp parallel shared(keep_going, keep_goings, matrices, cell_count_gt_50_degrees, test, iterations)
     {
-        unsigned int it, col;
-        // loop to completion
-        for(it = 0; it < MAX_ITERATIONS && keep_going; it++)
+        unsigned int it, nt, row, col;
+        int num_threads = omp_get_num_threads();
+        int thread_num = omp_get_thread_num();
+#pragma omp single
         {
-            compute(size, (float(*) [])current_plate, (float(*) [])next_plate);
+            matrices = malloc(sizeof(float*)*(num_threads+1));
+            for(nt = 0; nt < num_threads + 1; nt++)
+            {
+                matrices[nt] = malloc(size*size*sizeof(float));
+                initialize(size, (float(*) []) matrices[nt]);
+            }
+            keep_goings = malloc(sizeof(int)*(num_threads));
+        }
+        
+#pragma omp barrier
+        
+        // loop to completion
+        for(it = 0; it < MAX_ITERATIONS && keep_going; it+=num_threads)
+        {
+                
+            // calculate the next several iterations
+            for(nt = 0; nt < num_threads; nt++)
+            {
+                compute(size, (float(*) [])matrices[nt], (float(*) [])matrices[nt+1]);
+                set_static_cells(size, (float(*)[])matrices[thread_num+1]);
+#pragma omp barrier
+            }
             
+            
+            
+            keep_goings[thread_num] = has_converged(size, (float(*)[])matrices[thread_num], error, (char(*)[]) test);
+
 #pragma omp barrier
 #pragma omp master
             {
-                // set static cells
-                set_static_cells(size, (float(*)[])next_plate);
-                //swap pointers
-                swap(&current_plate, &next_plate);
-                // increment iterations
-                (*iterations)++;
-                // reset keep_going before test
-                keep_going = 0;
-            }
-#pragma omp barrier
-
-#pragma omp for schedule(dynamic) private(col) reduction(||: keep_going)
-            for(row = 1; row < size - 1; row++)
-            {
-                for(col = 1; col < size - 1; col++)
+                // check if we should keep going
+                keep_going = 1;
+                for(nt = 0; nt < num_threads; nt++)
                 {
-                    float average = ((*(current_plate + (row - 1)*size + col)) +
-                                     (*(current_plate + (row + 1)*size + col)) +
-                                     (*(current_plate + (row)*size + col + 1)) +
-                                     (*(current_plate + (row)*size + col - 1)))/4.0f;
-                               
-                    
-                    float difference = fabsf((*(current_plate + (row)*size + col)) - average);
-                
-                    /*printf("Avg: %f", average);
-                    printf("Val: %f", plate[row][col]);
-                    printf("Dif: %f", difference);*/
-                        
-                    if(difference >= error && !(*(test + row*size + col)))
+                    keep_going = keep_going && !keep_goings[nt];
+                    if(!keep_goings[nt])
                     {
-                        keep_going = 1;
+                        (*iterations)++;
+                    }
+                    else
+                    {
+                        (*cell_count_gt_50_degrees) = count_cells_by_degrees(size, (float(*) []) matrices[nt], 50.0f);
                         break;
                     }
                 }
+                
+                // swaps
+                float* temp = matrices[0];
+                matrices[0] = matrices[num_threads];
+                matrices[num_threads] = temp;
             }
+#pragma omp barrier
         }
+        
+        
+#pragma omp single
+        {
+            for(nt = 0; nt < num_threads + 1; nt++)
+            {
+                free(matrices[nt]);
+            }
+            free(keep_goings);
+            free(matrices);
+        }
+
     }
     
-    (*cell_count_gt_50_degrees) = count_cells_by_degrees(size, (float(*) []) current_plate, 50.0f);
-    
-    free(current_plate);
-    free(next_plate);
     free(test);
 }
 
@@ -222,11 +240,38 @@ void set_static_cells(int size, float plate[size][size])
     }
 }
 
-int has_converged(int size, float plate[size][size], float error, char test[size][size])
+inline int has_converged(int size, float plate[size][size], float error, char test[size][size])
 {
     int row, col;
     int converged = 1;
 
+    for(row = 1; row < size - 1; row++)
+    {
+        for(col = 1; col < size - 1; col++)
+        {
+            if(!test[row][col])
+            {
+                float average = (plate[row - 1][col] + plate[row + 1][col] + 
+                                 plate[row][col - 1] + plate[row][col + 1])/4.0f;
+                
+                float difference = fabsf(plate[row][col] - average);
+                
+                /*printf("Avg: %f", average);
+                printf("Val: %f", plate[row][col]);
+                printf("Dif: %f", difference);*/
+                    
+                if(difference >= error)
+                {
+                    converged = 0;
+                    break;
+                }
+            }
+        }
+        if(!converged)
+        {
+            break;
+        }
+    }
     
     return converged;
 }
@@ -264,18 +309,18 @@ int count_cells_by_degrees(int size, float plate[size][size], float temp)
     return count;
 }
 
-inline void swap(float** current, float** next)
+void swap(float** current, float** next)
 {
     float* temp = *current;
     *current = *next;
     *next = temp;
 }
 
-void compute(int size, float current[size][size], float next[size][size])
+inline void compute(int size, float current[size][size], float next[size][size])
 {
     int row, col;
     
-#pragma omp for schedule(dynamic) private(col) nowait
+#pragma omp for schedule(dynamic, 64) private(row, col) nowait
     for(row = 1; row < size - 1; row++)
     {
         float* top = current[row+1];

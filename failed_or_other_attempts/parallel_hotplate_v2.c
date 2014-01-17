@@ -11,14 +11,15 @@
 
 double get_seconds();
 void initialize(int size, float plate[size][size]);
+void initialize_test_cells(int size, int test[size][size]);
 void set_static_cells(int size, float plate[size][size]);
 void swap(float** current, float** next);
 void next_iteration(int size, float current[size][size], float next[size][size]);
-int has_converged(int size, float current[size][size], float error);
+int has_converged(int size, float current[size][size], float error, int test[size][size]);
 void print_matrix(int size, float plate[size][size]);
 int count_cells_by_degrees(int size, float plate[size][size], float temp);
 
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     // get start time
     double start_time = get_seconds();
@@ -28,6 +29,7 @@ int main(int argc, char *argv[])
     // allocate memory to matrices
     float* current_plate = malloc(SIZE*SIZE*sizeof(float));
     float* next_plate = malloc(SIZE*SIZE*sizeof(float));
+    int* test = malloc(SIZE*SIZE*sizeof(int));
     
     // check for bad allocation
     if(current_plate == 0 || next_plate == 0)
@@ -39,9 +41,10 @@ int main(int argc, char *argv[])
     // initialize the matrices
     initialize(SIZE, (float(*) [SIZE]) current_plate);
     initialize(SIZE, (float(*) [SIZE]) next_plate);
+    initialize_test_cells(SIZE, (int(*) [SIZE]) test);
     
     // iterate to convergence
-    while(!has_converged(SIZE, (float(*) [SIZE]) current_plate, ERROR))
+    while(!has_converged(SIZE, (float(*) [SIZE]) current_plate, ERROR, (int(*) [SIZE]) test))
     {
         next_iteration(SIZE, (float(*) [SIZE]) current_plate, (float(*) [SIZE]) next_plate);
         swap(&current_plate, &next_plate);
@@ -53,6 +56,7 @@ int main(int argc, char *argv[])
     // free the matrices
     free(current_plate);
     free(next_plate);
+    free(test);
     
     // get stop time
     double end_time = get_seconds();
@@ -109,6 +113,29 @@ void initialize(int size, float plate[size][size])
     set_static_cells(size, plate);
 }
 
+void initialize_test_cells(int size, int test[size][size])
+{
+    int row, col;
+    
+    for(row = 0; row < size; row++)
+    {
+        for(col = 0; col < size; col++)
+        {
+            test[row][col] = 0;
+        }
+    }
+    
+    if(size > 500)
+    {
+        for(col = 0; col < 331; col++)
+        {
+            test[400][col] = 1;
+        }
+    
+        test[200][500] = 1;
+    }
+}
+
 void set_static_cells(int size, float plate[size][size])
 {
     int col;
@@ -140,47 +167,48 @@ void next_iteration(int size, float current[size][size], float next[size][size])
     #pragma omp parallel for private(col)
     for(row = 1; row < size - 1; row++)
     {
+        float* top = current[row - 1];
+        float* curr = current[row];
+        float* bottom = current[row + 1];
         for(col = 1; col < size - 1; col++)
         {
-            next[row][col] = (current[row - 1][col] + current[row + 1][col] + 
-                              current[row][col - 1] + current[row][col + 1] + 
-                              4.0*current[row][col])/8.0f; 
+            next[row][col] = (top[col] + bottom[col] + 
+                              curr[col - 1] + curr[col + 1] + 
+                              4.0*curr[col])/8.0f; 
         }
     }
     
     set_static_cells(size, next);
 }
 
-int has_converged(int size, float plate[size][size], float error)
+int has_converged(int size, float plate[size][size], float error, int test[size][size])
 {
     int row, col;
     int converged = 1;
     
-    #pragma omp parallel for private(col) reduction(&&: converged)
     for(row = 1; row < size - 1; row++)
     {
-        if(converged)
-            for(col = 1; col < size - 1; col++)
+        for(col = 1; col < size - 1; col++)
+        {
+            if(!test[row][col])
             {
-                if(!((row == 400 && col > 0 && col <= 330) || (row == 200 && col == 500)))
+                float average = (plate[row - 1][col] + plate[row + 1][col] + 
+                                 plate[row][col - 1] + plate[row][col + 1])/4.0f;
+                           
+                
+                float difference = fabsf(plate[row][col] - average);
+                
+                /*printf("Avg: %f", average);
+                printf("Val: %f", plate[row][col]);
+                printf("Dif: %f", difference);*/
+                    
+                if(difference >= error)
                 {
-                    float average = (plate[row - 1][col] + plate[row + 1][col] + 
-                                     plate[row][col - 1] + plate[row][col + 1])/4.0f;
-                               
-                    
-                    float difference = fabsf(plate[row][col] - average);
-                    
-                    /*printf("Avg: %f", average);
-                    printf("Val: %f", plate[row][col]);
-                    printf("Dif: %f", difference);*/
-                        
-                    if(difference >= error)
-                    {
-                        converged = 0;
-                        break;
-                    }
+                    converged = 0;
+                    break;
                 }
             }
+        }
     }
     
     return converged;
