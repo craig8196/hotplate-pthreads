@@ -1,9 +1,7 @@
 /*
  * Each 2D array is organized such that the first index is the row, the second is the column.
- * This is a vanilla version where the chunk sizes are static and the compute and has_converged functions are mutithreaded.
- * This version uses a linear barrier where the last thread in will perform the swap, increment iterations, etc.
  * 
- * Version 2: Change to busy wait barrier.
+ * Version 6: Dynamic scheduler.
  */
 
 #include <stdio.h>
@@ -26,6 +24,12 @@ typedef struct thread_info_t
     int num_of_threads;
     int size;
     float error;
+    
+    int chunk_size;
+    int* chunk_index;
+    int chunk_count;
+    pthread_mutex_t* chunk_lock;
+    
     float** current_hotplate;
     float** next_hotplate;
     int** test_plate;
@@ -49,7 +53,7 @@ void initialize(int size, float plate[size][size]);
 void initialize_test_cells(int size, int test[size][size]);
 void set_static_cells(int size, float plate[size][size]);
 void swap(float** current, float** next);
-void compute(ThreadInfo* info, int size, float current[size][size], float next[size][size]);
+void compute(int next_chunk_index, int chunk_size, int size, float current[size][size], float next[size][size]);
 void has_converged(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size]);
 void* run_thread(void* thread_info);
 void run_hotplate(int num_threads, int size_of_plate, float error, int* iterations, int* cell_count_gt_50_degrees);
@@ -226,18 +230,33 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
     float* next_plate = malloc(size*size*sizeof(float));
     int* test = malloc(size*size*sizeof(int));
     LinearBarrier* barrier = new_linear_barrier(barrier);
+    pthread_mutex_t* chunk_lock = malloc(sizeof(pthread_mutex_t));
     
     
     // initialize the matrices
     initialize(size, (float(*) []) current_plate);
     initialize(size, (float(*) []) next_plate);
     initialize_test_cells(size, (int(*) []) test);
+    pthread_mutex_init(chunk_lock, NULL);
     
+    int chunk_index = 0;
+    int chunk_size = 64;
+    int chunk_count = size/chunk_size;
+    if(size%chunk_size != 0)
+    {
+        chunk_count++;
+    }
     
     // init thread info
     int i;
     for(i = 0; i < num_threads; i++)
     {
+        threads_info[i].chunk_size = chunk_size;
+        threads_info[i].chunk_index = &chunk_index;
+        threads_info[i].chunk_count = chunk_count;
+        threads_info[i].chunk_lock = chunk_lock;
+        
+        
         threads_info[i].my_thread_num = i;
         threads_info[i].num_of_threads = num_threads;
         threads_info[i].size = size;
@@ -295,6 +314,8 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
     free(next_plate);
     free(test);
     destroy_linear_barrier(&barrier);
+    pthread_mutex_destroy(chunk_lock);
+    free(chunk_lock);
     
     double teardown_time = get_seconds() - start_time;
     
@@ -305,16 +326,37 @@ void* run_thread(void* thread_info)
 {
     ThreadInfo* info = (ThreadInfo*) thread_info;
     //printf("Thread %d of %d running.\n", info->my_thread_num, info->num_of_threads);
-    
+    double start_time;
+    int next_chunk_index = -1;
     
     while(*(info->keep_going))
     {
-        double start_time = get_seconds();
-        compute(info, info->size, (float(*)[])(*(info->current_hotplate)), (float(*)[])(*(info->next_hotplate)));
-        info->my_compute_time += (get_seconds() - start_time);
+        while((*(info->chunk_index)) != info->chunk_count)
+        {
+            pthread_mutex_lock(info->chunk_lock);
+            if((*(info->chunk_index)) != info->chunk_count)
+            {
+                next_chunk_index = *(info->chunk_index);
+                (*(info->chunk_index))++;
+            }
+            else
+            {
+                next_chunk_index = info->chunk_count;
+            }
+            pthread_mutex_unlock(info->chunk_lock);
+            
+            if(next_chunk_index != info->chunk_count)
+            {
+                double start_time = get_seconds();
+                compute(next_chunk_index, info->chunk_size, info->size, (float(*)[])(*(info->current_hotplate)), (float(*)[])(*(info->next_hotplate)));
+                info->my_compute_time += (get_seconds() - start_time);
+            }
+        }
+        
         start_time = get_seconds();
         has_converged(info, info->size, (float(*)[])(*(info->current_hotplate)), info->error, (int(*)[])(*(info->test_plate)));
         info->my_converged_time += (get_seconds() - start_time);
+        
         start_time = get_seconds();
         barrier(info);
         info->my_wait_time += (get_seconds() - start_time);
@@ -339,29 +381,29 @@ inline void swap(float** current, float** next)
     *next = temp;
 }
 
-void compute(ThreadInfo* info, int size, float current[size][size], float next[size][size])
+void compute(int next_chunk_index, int chunk_size, int size, float current[size][size], float next[size][size])
 {
-    int row, col, end, chunk_size;
-    chunk_size = size/(info->num_of_threads);
-    row = chunk_size*(info->my_thread_num);
-    end = row + chunk_size;
+    int row, col, row_end, col_end;
+    row = chunk_size*next_chunk_index;
+    row_end = row + chunk_size;
+    col_end = size - 1;
     if(row < 1)
     {
         row = 1;
     }
-    if(end > size - 1 || ((info->my_thread_num) == (info->num_of_threads - 1)))
+    if(row_end > col_end)
     {
-        end = size - 1;
+        row_end = col_end;
     }
     
     //printf("Thread %d computing from [%d to %d)\n", info->my_thread_num, row, end);
     
-    for(; row < end; row++)
+    for(; row < row_end; row++)
     {
         float* top = current[row+1];
         float* curr = current[row];
         float* bottom = current[row-1];
-        for(col = 1; col < size - 1; col++)
+        for(col = 1; col < col_end; col++)
         {
             next[row][col] = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
         }
@@ -371,7 +413,7 @@ void compute(ThreadInfo* info, int size, float current[size][size], float next[s
 void has_converged(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size])
 {
     int row, col, end, chunk_size;
-    *(info->my_keep_going) = 0;
+    info->my_keep_going = 0;
     chunk_size = size/(info->num_of_threads);
     row = chunk_size*(info->my_thread_num);
     end = row + chunk_size;
@@ -404,12 +446,11 @@ void has_converged(ThreadInfo* info, int size, float plate[size][size], float er
                 if(difference >= error)
                 {
                     info->my_keep_going = 1;
-                    (*(info->keep_going)) = 1;
                     break;
                 }
             }
         }
-        if(info->my_keep_going || (*(info->keep_going)))
+        if(info->my_keep_going)
         {
             break;
         }
@@ -427,6 +468,7 @@ void barrier(ThreadInfo* info)
     if(barrier->count == info->num_of_threads)
     {
         barrier->count = 0;
+        *(info->chunk_index) = 0;
         *(info->keep_going) = 0;
         
         int i;
@@ -439,6 +481,7 @@ void barrier(ThreadInfo* info)
         {
             swap(info->current_hotplate, info->next_hotplate);
             (*(info->iterations))++;
+            //printf("Iter: %d\n", *(info->iterations));
         }
         
         pthread_cond_broadcast(barrier->count_cond);

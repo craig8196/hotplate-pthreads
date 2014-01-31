@@ -1,7 +1,5 @@
 /*
  * Each 2D array is organized such that the first index is the row, the second is the column.
- * This is a vanilla version where the chunk sizes are static and the compute and has_converged functions are mutithreaded.
- * This version uses a linear barrier where the last thread in will perform the swap, increment iterations, etc.
  * 
  * Version 3: Change to single point test for convergence.
  */
