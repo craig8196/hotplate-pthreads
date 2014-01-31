@@ -59,6 +59,7 @@ int quick_convergence_test(ThreadInfo* info, int size, float plate[size][size], 
 void* run_thread(void* thread_info);
 void run_hotplate(int num_threads, int size_of_plate, float error, int* iterations, int* cell_count_gt_50_degrees);
 void barrier(ThreadInfo* info);
+void compute_static(ThreadInfo* info, int size, float current[size][size], float next[size][size]);
 
 
 // performs statistics and various overhead functions
@@ -337,7 +338,7 @@ void* run_thread(void* thread_info)
     while(*(info->keep_going))
     {
         // perform computations until nothing is left
-        while((*(info->chunk_index)) != info->chunk_count)
+        /*while((*(info->chunk_index)) != info->chunk_count)
         {
             pthread_mutex_lock(info->chunk_lock);
             if((*(info->chunk_index)) != info->chunk_count)
@@ -357,7 +358,11 @@ void* run_thread(void* thread_info)
                 compute(next_chunk_index, info->chunk_size, info->size, (float(*)[])(*(info->current_hotplate)), (float(*)[])(*(info->next_hotplate)));
                 info->my_compute_time += (get_seconds() - start_time);
             }
-        }
+        }*/
+        
+        start_time = get_seconds();
+        compute_static(info, info->size, (float(*)[])(*(info->current_hotplate)), (float(*)[])(*(info->next_hotplate)));
+        info->my_compute_time += (get_seconds() - start_time);
         
         start_time = get_seconds();
         barrier(info);
@@ -480,6 +485,7 @@ void barrier(ThreadInfo* info)
         {
             swap(info->current_hotplate, info->next_hotplate);
             (*(info->iterations))++;
+            //printf("Iter: %d\n", *(info->iterations));
         }
         else
         {
@@ -492,10 +498,45 @@ void barrier(ThreadInfo* info)
                 (*(info->iterations))++;
             }
         }
+        
+        int i;
+        for(i = 0; i < info->num_of_threads; i++)
+        {
+            ((info->all_threads_info)[i]).my_wait = 0;
+        }
     }
     else
     {
         pthread_mutex_unlock(info->count_lock);
         while(info->my_wait);// printf("Thread %d\n", info->my_thread_num);
+    }
+}
+
+void compute_static(ThreadInfo* info, int size, float current[size][size], float next[size][size])
+{
+    int row, col, end, chunk_size;
+    chunk_size = size/(info->num_of_threads);
+    row = chunk_size*(info->my_thread_num);
+    end = row + chunk_size;
+    if(row < 1)
+    {
+        row = 1;
+    }
+    if(end > size - 1 || ((info->my_thread_num) == (info->num_of_threads - 1)))
+    {
+        end = size - 1;
+    }
+    
+    //printf("Thread %d computing from [%d to %d)\n", info->my_thread_num, row, end);
+    
+    for(; row < end; row++)
+    {
+        float* top = current[row+1];
+        float* curr = current[row];
+        float* bottom = current[row-1];
+        for(col = 1; col < size - 1; col++)
+        {
+            next[row][col] = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
+        }
     }
 }
