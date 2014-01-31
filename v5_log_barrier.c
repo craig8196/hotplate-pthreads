@@ -13,12 +13,18 @@
 #include <float.h>
 
 // structs
-typedef struct linear_barrier_t
-{
-    int count;
-    pthread_mutex_t* count_lock;
-    pthread_cond_t* count_cond;
-} LinearBarrier;
+typedef struct barrier_node {
+        pthread_mutex_t count_lock;
+        pthread_cond_t ok_to_proceed_up;
+        pthread_cond_t ok_to_proceed_down;
+        int count;
+} BarrierNode;
+
+typedef struct log_barrier {
+    BarrierNode* barrier_nodes;
+    int number_in_barrier;
+    pthread_mutex_t logbarrier_count_lock;
+} LogBarrier;
 
 typedef struct thread_info_t
 {
@@ -29,16 +35,16 @@ typedef struct thread_info_t
     float** current_hotplate;
     float** next_hotplate;
     int** test_plate;
-    int* keep_going;
-    int my_keep_going;
-    int* iterations;
+    volatile int* keep_going;
+    volatile int my_keep_going;
+    volatile int* iterations;
     int* cell_count;
     double my_compute_time;
     double my_converged_time;
     int my_converged_count;
     double my_wait_time;
     struct thread_info_t* all_threads_info;
-    LinearBarrier* barrier;
+    LogBarrier* barrier;
 } ThreadInfo;
 
 
@@ -54,8 +60,10 @@ void has_converged(ThreadInfo* info, int size, float plate[size][size], float er
 void* run_thread(void* thread_info);
 void run_hotplate(int num_threads, int size_of_plate, float error, int* iterations, int* cell_count_gt_50_degrees);
 void barrier(ThreadInfo* info);
-LinearBarrier* new_linear_barrier();
-void destroy_linear_barrier(LinearBarrier** barrier);
+LogBarrier* new_log_barrier(int num_threads);
+void destroy_log_barrier(LogBarrier** barrier);
+void mylib_init_barrier_nodes(int num_threads, BarrierNode* b);
+
 
 
 // performs statistics and various overhead functions
@@ -214,7 +222,7 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
     (*iterations) = 0;
     (*cell_count_gt_50_degrees) = 0;
     
-    int keep_going = 1;
+    volatile int keep_going = 1;
     int rc = 0;
     void* status = &rc;
     
@@ -225,8 +233,7 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
     float* current_plate = malloc(size*size*sizeof(float));
     float* next_plate = malloc(size*size*sizeof(float));
     int* test = malloc(size*size*sizeof(int));
-    LinearBarrier* barrier = new_linear_barrier(barrier);
-    
+    LogBarrier* barrier = new_log_barrier(num_threads);
     
     // initialize the matrices
     initialize(size, (float(*) []) current_plate);
@@ -294,7 +301,7 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
     free(current_plate);
     free(next_plate);
     free(test);
-    destroy_linear_barrier(&barrier);
+    destroy_log_barrier(&barrier);
     
     double teardown_time = get_seconds() - start_time;
     
@@ -371,7 +378,7 @@ void compute(ThreadInfo* info, int size, float current[size][size], float next[s
 void has_converged(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size])
 {
     int row, col, end, chunk_size;
-    *(info->my_keep_going) = 0;
+    info->my_keep_going = 0;
     chunk_size = size/(info->num_of_threads);
     row = chunk_size*(info->my_thread_num);
     end = row + chunk_size;
@@ -404,73 +411,140 @@ void has_converged(ThreadInfo* info, int size, float plate[size][size], float er
                 if(difference >= error)
                 {
                     info->my_keep_going = 1;
-                    (*(info->keep_going)) = 1;
                     break;
                 }
             }
         }
-        if(info->my_keep_going || (*(info->keep_going)))
+        if(info->my_keep_going)
         {
             break;
         }
     }
 }
 
-void barrier(ThreadInfo* info)
+
+LogBarrier* new_log_barrier(int num_threads)
 {
-    LinearBarrier* barrier = info->barrier;
+    LogBarrier* barrier = malloc(sizeof(LogBarrier));
     
-    pthread_mutex_lock(barrier->count_lock);
+    barrier->barrier_nodes = malloc(sizeof(BarrierNode)*num_threads);
     
-    (barrier->count)++;
+    mylib_init_barrier_nodes(num_threads, barrier->barrier_nodes);
+    pthread_mutex_init(&(barrier->logbarrier_count_lock), NULL);
+    barrier->number_in_barrier = 0;
     
-    if(barrier->count == info->num_of_threads)
+    return barrier;
+}
+void destroy_log_barrier(LogBarrier** barrier)
+{
+    pthread_mutex_destroy(&((*barrier)->logbarrier_count_lock));
+    
+    free((*barrier)->barrier_nodes);
+    free(*barrier);
+    (*barrier) = NULL;
+}
+
+void mylib_init_barrier_nodes(int num_threads, BarrierNode* b)
+{
+        int i;
+        for (i = 0; i < num_threads; i++) {
+                b[i].count = 0;
+                pthread_mutex_init(&(b[i].count_lock), NULL);
+                pthread_cond_init(&(b[i].ok_to_proceed_up), NULL);
+                pthread_cond_init(&(b[i].ok_to_proceed_down), NULL);
+        }
+}
+
+void barrier (ThreadInfo* info) //mylob_logbarrier_t b, int num_threads, int thread_id)
+{
+    LogBarrier* barrier = info->barrier;
+    BarrierNode* b = barrier->barrier_nodes;
+    
+    int num, base, index;
+    num = 2;
+    base = 0;
+
+    if (info->num_of_threads == 1)
     {
-        barrier->count = 0;
         *(info->keep_going) = 0;
         
         int i;
         for(i = 0; i < info->num_of_threads; i++)
         {
-            *(info->keep_going) = *(info->keep_going) || ((info->all_threads_info)[i]).my_keep_going;
+            *(info->keep_going) += (info->all_threads_info)[i].my_keep_going;
         }
         
         if(*(info->keep_going))
         {
             swap(info->current_hotplate, info->next_hotplate);
             (*(info->iterations))++;
+            //printf("Iter: %d", *(info->iterations));
+        }
+        return;
+    }
+    
+    pthread_mutex_lock(&(barrier->logbarrier_count_lock));
+    (barrier->number_in_barrier)++;
+    
+    if (barrier->number_in_barrier == info->num_of_threads)
+    {
+        *(info->keep_going) = 0;
+        (barrier->number_in_barrier) = 0;
+        int i;
+        for(i = 0; i < info->num_of_threads; i++)
+        {
+            *(info->keep_going) += (info->all_threads_info)[i].my_keep_going;
         }
         
-        pthread_cond_broadcast(barrier->count_cond);
+        if(*(info->keep_going))
+        {
+            swap(info->current_hotplate, info->next_hotplate);
+            (*(info->iterations))++;
+            //printf("Iter: %d", *(info->iterations));
+        }
     }
-    else
+    pthread_mutex_unlock(&(barrier->logbarrier_count_lock));
+    
+    //printf("Thread %d\n", info->my_thread_num);
+    
+    do
     {
-        while(pthread_cond_wait(barrier->count_cond, barrier->count_lock));
+        index = base + (info->my_thread_num) /num;
+        
+        if ((info->my_thread_num) % num == 0)
+        {
+            pthread_mutex_lock(&(b[index].count_lock));
+            b[index].count ++;
+            while (b[index].count < 2)
+                pthread_cond_wait(&(b[index].ok_to_proceed_up),
+                                  &(b[index].count_lock));
+                pthread_mutex_unlock(&(b[index].count_lock));
+        }
+        else
+        {
+            pthread_mutex_lock(&(b[index].count_lock));
+            b[index].count ++;
+            if (b[index].count == 2)
+                pthread_cond_signal(&(b[index].ok_to_proceed_up));
+
+            while (pthread_cond_wait(&(b[index].ok_to_proceed_down),
+                                     &(b[index].count_lock)) != 0);
+            pthread_mutex_unlock(&(b[index].count_lock));
+            break;
+        }
+        base = base + info->num_of_threads/num;
+        num =num * 2;
+    } while (num <= info->num_of_threads);
+
+    num = num / 2;
+
+    for (; num > 1; num = num / 2)
+    {
+        base = base - info->num_of_threads/num;
+        index = base + info->my_thread_num / num;
+        pthread_mutex_lock(&(b[index].count_lock));
+        b[index].count = 0;
+        pthread_cond_signal(&(b[index].ok_to_proceed_down));
+        pthread_mutex_unlock(&(b[index].count_lock));
     }
-    
-    pthread_mutex_unlock(barrier->count_lock);
-}
-
-
-LinearBarrier* new_linear_barrier()
-{
-    LinearBarrier* barrier = malloc(sizeof(LinearBarrier));
-    
-    barrier->count_lock = malloc(sizeof(pthread_mutex_t));
-    barrier->count_cond = malloc(sizeof(pthread_cond_t));
-    barrier->count = 0;
-    pthread_mutex_init(barrier->count_lock, NULL);
-    pthread_cond_init(barrier->count_cond, NULL);
-    
-    return barrier;
-}
-void destroy_linear_barrier(LinearBarrier** barrier)
-{
-    pthread_mutex_destroy((*barrier)->count_lock);
-    pthread_cond_destroy((*barrier)->count_cond);
-    
-    free((*barrier)->count_lock);
-    free((*barrier)->count_cond);
-    free(*barrier);
-    (*barrier) = NULL;
 }

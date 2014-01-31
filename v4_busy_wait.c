@@ -3,7 +3,7 @@
  * This is a vanilla version where the chunk sizes are static and the compute and has_converged functions are mutithreaded.
  * This version uses a linear barrier where the last thread in will perform the swap, increment iterations, etc.
  * 
- * Version 2: Change to busy wait barrier.
+ * Version 1: Straight forward vanilla algorithm.
  */
 
 #include <stdio.h>
@@ -39,6 +39,7 @@ typedef struct thread_info_t
     double my_wait_time;
     struct thread_info_t* all_threads_info;
     LinearBarrier* barrier;
+    volatile int my_wait;
 } ThreadInfo;
 
 
@@ -371,7 +372,7 @@ void compute(ThreadInfo* info, int size, float current[size][size], float next[s
 void has_converged(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size])
 {
     int row, col, end, chunk_size;
-    *(info->my_keep_going) = 0;
+    info->my_keep_going = 0;
     chunk_size = size/(info->num_of_threads);
     row = chunk_size*(info->my_thread_num);
     end = row + chunk_size;
@@ -404,12 +405,11 @@ void has_converged(ThreadInfo* info, int size, float plate[size][size], float er
                 if(difference >= error)
                 {
                     info->my_keep_going = 1;
-                    (*(info->keep_going)) = 1;
                     break;
                 }
             }
         }
-        if(info->my_keep_going || (*(info->keep_going)))
+        if(info->my_keep_going)
         {
             break;
         }
@@ -420,12 +420,14 @@ void barrier(ThreadInfo* info)
 {
     LinearBarrier* barrier = info->barrier;
     
+    info->my_wait = 1;
     pthread_mutex_lock(barrier->count_lock);
-    
     (barrier->count)++;
     
     if(barrier->count == info->num_of_threads)
     {
+        pthread_mutex_unlock(barrier->count_lock);
+        
         barrier->count = 0;
         *(info->keep_going) = 0;
         
@@ -441,14 +443,16 @@ void barrier(ThreadInfo* info)
             (*(info->iterations))++;
         }
         
-        pthread_cond_broadcast(barrier->count_cond);
+        for(i = 0; i < info->num_of_threads; i++)
+        {
+            ((info->all_threads_info)[i]).my_wait = 0;
+        }
     }
     else
     {
-        while(pthread_cond_wait(barrier->count_cond, barrier->count_lock));
+        pthread_mutex_unlock(barrier->count_lock);
+        while(info->my_wait){}// printf("Thread %d\n", info->my_thread_num);
     }
-    
-    pthread_mutex_unlock(barrier->count_lock);
 }
 
 

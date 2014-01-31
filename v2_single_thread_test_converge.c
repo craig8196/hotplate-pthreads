@@ -3,7 +3,7 @@
  * This is a vanilla version where the chunk sizes are static and the compute and has_converged functions are mutithreaded.
  * This version uses a linear barrier where the last thread in will perform the swap, increment iterations, etc.
  * 
- * Version 2: Change to single thread testing for convergence and buffer thread info to ensure cache lines aren't invalidated.
+ * Version 2: Change to single thread testing for convergence.
  */
 
 #include <stdio.h>
@@ -44,8 +44,6 @@ typedef struct thread_info_t
     
     struct thread_info_t* all_threads_info;
     LinearBarrier* barrier;
-    
-    char cache_line_buffer[64];
 } ThreadInfo;
 
 
@@ -240,10 +238,6 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
     initialize(size, (float(*) []) next_plate);
     initialize_test_cells(size, (int(*) []) test);
     
-    // offsets for quick check
-    int row_offset = 1;
-    int col_offset = 1;
-    
     // init thread info
     int i;
     for(i = 0; i < num_threads; i++)
@@ -265,8 +259,6 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
         threads_info[i].my_wait_time = 0.0f;
         threads_info[i].all_threads_info = threads_info;
         threads_info[i].barrier = barrier;
-        threads_info[i].row_offset = &row_offset;
-        threads_info[i].col_offset = &col_offset;
     }
     
     // create threads
@@ -437,10 +429,6 @@ void barrier(ThreadInfo* info)
         {
             swap(info->current_hotplate, info->next_hotplate);
             (*(info->iterations))++;
-        }
-        else
-        {
-            # TODO insert thingy here
         }
         
         pthread_cond_broadcast(barrier->count_cond);

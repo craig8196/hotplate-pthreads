@@ -47,8 +47,6 @@ typedef struct thread_info_t
     
     int* row_index;
     int* col_index;
-    
-    char cache_line_buffer[64];
 } ThreadInfo;
 
 
@@ -60,7 +58,7 @@ void initialize_test_cells(int size, int test[size][size]);
 void set_static_cells(int size, float plate[size][size]);
 void swap(float** current, float** next);
 void compute(ThreadInfo* info, int size, float current[size][size], float next[size][size]);
-int has_converged(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size]);
+int quick_convergence_test(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size]);
 void* run_thread(void* thread_info);
 void run_hotplate(int num_threads, int size_of_plate, float error, int* iterations, int* cell_count_gt_50_degrees);
 void barrier(ThreadInfo* info);
@@ -379,45 +377,6 @@ void compute(ThreadInfo* info, int size, float current[size][size], float next[s
             next[row][col] = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
         }
     }
-}
-
-int slow_convergence_test(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size])
-{
-    int row, col, converged;
-    
-    converged = 1;
-    
-    for(row = 1; row < size - 1; row++)
-    {
-        for(col = 1; col < size - 1; col++)
-        {
-            if(!test[row][col])
-            {
-                (info->my_converged_count)++;
-                float average = (plate[row - 1][col] + plate[row + 1][col] + 
-                                 plate[row][col - 1] + plate[row][col + 1])/4.0f;
-                           
-                
-                float difference = fabsf(plate[row][col] - average);
-                
-                /*printf("Avg: %f", average);
-                printf("Val: %f", plate[row][col]);
-                printf("Dif: %f", difference);*/
-                    
-                if(difference >= error)
-                {
-                    converged = 0;
-                    break;
-                }
-            }
-        }
-        if(!converged)
-        {
-            break;
-        }
-    }
-    
-    return converged;
 }
 
 int quick_convergence_test(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size])
