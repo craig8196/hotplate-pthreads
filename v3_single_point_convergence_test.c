@@ -3,7 +3,7 @@
  * This is a vanilla version where the chunk sizes are static and the compute and has_converged functions are mutithreaded.
  * This version uses a linear barrier where the last thread in will perform the swap, increment iterations, etc.
  * 
- * Version 2: Change to single thread testing for convergence and buffer thread info to ensure cache lines aren't invalidated.
+ * Version 3: Change to single point test for convergence.
  */
 
 #include <stdio.h>
@@ -44,6 +44,9 @@ typedef struct thread_info_t
     
     struct thread_info_t* all_threads_info;
     LinearBarrier* barrier;
+    
+    int* row_index;
+    int* col_index;
     
     char cache_line_buffer[64];
 } ThreadInfo;
@@ -241,8 +244,8 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
     initialize_test_cells(size, (int(*) []) test);
     
     // offsets for quick check
-    int row_offset = 1;
-    int col_offset = 1;
+    int row_index = 1;
+    int col_index = 1;
     
     // init thread info
     int i;
@@ -265,8 +268,8 @@ void run_hotplate(int num_threads, int size, float error, int* iterations, int* 
         threads_info[i].my_wait_time = 0.0f;
         threads_info[i].all_threads_info = threads_info;
         threads_info[i].barrier = barrier;
-        threads_info[i].row_offset = &row_offset;
-        threads_info[i].col_offset = &col_offset;
+        threads_info[i].row_index = &row_index;
+        threads_info[i].col_index = &col_index;
     }
     
     // create threads
@@ -378,7 +381,7 @@ void compute(ThreadInfo* info, int size, float current[size][size], float next[s
     }
 }
 
-int has_converged(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size])
+int slow_convergence_test(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size])
 {
     int row, col, converged;
     
@@ -417,6 +420,59 @@ int has_converged(ThreadInfo* info, int size, float plate[size][size], float err
     return converged;
 }
 
+int quick_convergence_test(ThreadInfo* info, int size, float plate[size][size], float error, int test[size][size])
+{
+    int row, col, converged, first_iteration;
+    
+    row = *(info->row_index);
+    col = *(info->col_index);
+    first_iteration = 1;
+    converged = 1;
+    
+    for(; row < size - 1; row++)
+    {
+        if(!first_iteration)
+        {
+            col = 1;
+        }
+        else
+        {
+            first_iteration = 0;
+        }
+        
+        for(; col < size - 1; col++)
+        {
+            if(!test[row][col])
+            {
+                (info->my_converged_count)++;
+                float average = (plate[row - 1][col] + plate[row + 1][col] + 
+                                 plate[row][col - 1] + plate[row][col + 1])/4.0f;
+                           
+                
+                float difference = fabsf(plate[row][col] - average);
+                
+                /*printf("Avg: %f", average);
+                printf("Val: %f", plate[row][col]);
+                printf("Dif: %f", difference);*/
+                    
+                if(difference >= error)
+                {
+                    *(info->row_index) = row;
+                    *(info->col_index) = col;
+                    converged = 0;
+                    break;
+                }
+            }
+        }
+        if(!converged)
+        {
+            break;
+        }
+    }
+    
+    return converged;
+}
+
 void barrier(ThreadInfo* info)
 {
     LinearBarrier* barrier = info->barrier;
@@ -428,7 +484,7 @@ void barrier(ThreadInfo* info)
     if(barrier->count == info->num_of_threads)
     {
         double start_time = get_seconds();
-        *(info->keep_going) = !has_converged(info, info->size, (float(*)[])(*(info->current_hotplate)), info->error, (int(*)[])(*(info->test_plate)));
+        *(info->keep_going) = !quick_convergence_test(info, info->size, (float(*)[])(*(info->current_hotplate)), info->error, (int(*)[])(*(info->test_plate)));
         info->my_converged_time += (get_seconds() - start_time);
         
         barrier->count = 0;
@@ -440,7 +496,14 @@ void barrier(ThreadInfo* info)
         }
         else
         {
-            # TODO insert thingy here
+            *(info->row_index) = 1;
+            *(info->col_index) = 1;
+            *(info->keep_going) = !quick_convergence_test(info, info->size, (float(*)[])(*(info->current_hotplate)), info->error, (int(*)[])(*(info->test_plate)));
+            if(*(info->keep_going))
+            {
+                swap(info->current_hotplate, info->next_hotplate);
+                (*(info->iterations))++;
+            }
         }
         
         pthread_cond_broadcast(barrier->count_cond);
