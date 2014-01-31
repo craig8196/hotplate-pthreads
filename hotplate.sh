@@ -1,8 +1,7 @@
 #!/bin/bash
 
-thread_nums=(1 2 4 8 16)
+thread_nums=(1 2 4 8 16 32)
 
 for i in ${thread_nums[@]}; do
-    export OMP_NUM_THREADS=$i
-    ./hot
+    ./hot $i 10
 done

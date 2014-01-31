@@ -5,70 +5,141 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-
-#define SIZE 1024
-#define ERROR 0.1
+#include <float.h>
 
 double get_seconds();
 void initialize(int size, float plate[size][size]);
-void initialize_test_cells(int size, int test[size][size]);
+void initialize_test_cells(int size, char test[size][size]);
 void set_static_cells(int size, float plate[size][size]);
 void swap(float** current, float** next);
-void next_iteration(int size, float current[size][size], float next[size][size]);
-int has_converged(int size, float current[size][size], float error, int test[size][size]);
 void print_matrix(int size, float plate[size][size]);
 int count_cells_by_degrees(int size, float plate[size][size], float temp);
+void hotplate(int size, float error, int* iterations, int* cell_count_gt_50_degrees);
+inline void compute(int size, float current[size][size], float next[size][size]);
+inline int has_converged(int size, float plate[size][size], float error, char test[size][size]);
 
 int main(int argc, char* argv[])
 {
-    // get start time
-    double start_time = get_seconds();
+    int r;
+    int repetitions = 10;
+    double total_time = 0;
+    double fastest_time = FLT_MAX;
     
-    int iteration_count = 0;
-    
-    // allocate memory to matrices
-    float* current_plate = malloc(SIZE*SIZE*sizeof(float));
-    float* next_plate = malloc(SIZE*SIZE*sizeof(float));
-    int* test = malloc(SIZE*SIZE*sizeof(int));
-    
-    // check for bad allocation
-    if(current_plate == 0 || next_plate == 0)
+    for(r = 0; r < repetitions; r++)
     {
-        printf("Bad allocation.\n");
-        return 1;
+        // get start time
+        double start_time = get_seconds();
+
+        
+        // define sizes
+        const int size = 1024;
+        const float error = 0.1f;
+        // define counters
+        int iteration_count = 0;
+        int cell_count_gt_50_degrees = 0;
+        // run hotplate
+        hotplate(size, error, &iteration_count, &cell_count_gt_50_degrees);
+        
+        
+        // get stop time
+        double end_time = get_seconds();
+        double time_interval = end_time - start_time;
+        
+        // report convergence and time
+        printf("Iterations: %d\n", iteration_count);
+        printf("Cells with >= 50.0 degrees: %d\n", cell_count_gt_50_degrees);
+        printf("%d %f\n", omp_get_max_threads(), time_interval); // number_of_threads time_to_execute
+        fflush(stdout);
+        
+        total_time += time_interval;
+        if(time_interval < fastest_time)
+        {
+            fastest_time = time_interval;
+        }
     }
     
-    // initialize the matrices
-    initialize(SIZE, (float(*) [SIZE]) current_plate);
-    initialize(SIZE, (float(*) [SIZE]) next_plate);
-    initialize_test_cells(SIZE, (int(*) [SIZE]) test);
-    
-    // iterate to convergence
-    while(!has_converged(SIZE, (float(*) [SIZE]) current_plate, ERROR, (int(*) [SIZE]) test))
-    {
-        next_iteration(SIZE, (float(*) [SIZE]) current_plate, (float(*) [SIZE]) next_plate);
-        swap(&current_plate, &next_plate);
-        iteration_count++;
-    }
-    
-    int cell_count_gt_50_degrees = count_cells_by_degrees(SIZE, (float(*) [SIZE]) current_plate, 50.0f);
-    
-    // free the matrices
-    free(current_plate);
-    free(next_plate);
-    free(test);
-    
-    // get stop time
-    double end_time = get_seconds();
-    double total_time = end_time - start_time;
-    
-    // report convergence and time
-    printf("Iterations: %d\n", iteration_count);
-    printf("Time: %f\n", total_time);
-    printf("Cells with >= 50.0 degrees: %d\n", cell_count_gt_50_degrees);
+    // report average and fastest times
+    printf("Average Time: %f\n", total_time/repetitions);
+    printf("Fastest Time: %f\n", fastest_time);
     fflush(stdout);
     
     return 0;
+}
+
+void hotplate(int size, float error, int* iterations, int* cell_count_gt_50_degrees)
+{
+    // allocate memory to matrices
+    float* current_plate = malloc(size*size*sizeof(float));
+    float* next_plate = malloc(size*size*sizeof(float));
+    char* test = malloc(size*size*sizeof(char));
+    
+    // initialize the matrices
+    initialize(size, (float(*) []) current_plate);
+    initialize(size, (float(*) []) next_plate);
+    initialize_test_cells(size, (char(*) []) test);
+    
+    (*iterations) = 0;
+    
+    int keep_going = 1;
+    
+    const int MAX_ITERATIONS = 500;  // a safety while testing
+    
+    unsigned int row;
+    
+#pragma omp parallel shared(keep_going, cell_count_gt_50_degrees, test, current_plate, next_plate, iterations)
+    {
+        unsigned int it, col;
+        // loop to completion
+        for(it = 0; it < MAX_ITERATIONS && keep_going; it++)
+        {
+            compute(size, (float(*) [])current_plate, (float(*) [])next_plate);
+            
+#pragma omp barrier
+#pragma omp master
+            {
+                // set static cells
+                set_static_cells(size, (float(*)[])next_plate);
+                //swap pointers
+                swap(&current_plate, &next_plate);
+                // increment iterations
+                (*iterations)++;
+                // reset keep_going before test
+                keep_going = 0;
+            }
+#pragma omp barrier
+
+#pragma omp for schedule(dynamic) private(col) reduction(||: keep_going)
+            for(row = 1; row < size - 1; row++)
+            {
+                for(col = 1; col < size - 1; col++)
+                {
+                    float average = ((*(current_plate + (row - 1)*size + col)) +
+                                     (*(current_plate + (row + 1)*size + col)) +
+                                     (*(current_plate + (row)*size + col + 1)) +
+                                     (*(current_plate + (row)*size + col - 1)))/4.0f;
+                               
+                    
+                    float difference = fabsf((*(current_plate + (row)*size + col)) - average);
+                
+                    /*printf("Avg: %f", average);
+                    printf("Val: %f", plate[row][col]);
+                    printf("Dif: %f", difference);*/
+                        
+                    if(difference >= error && !(*(test + row*size + col)))
+                    {
+                        keep_going = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    (*cell_count_gt_50_degrees) = count_cells_by_degrees(size, (float(*) []) current_plate, 50.0f);
+    
+    free(current_plate);
+    free(next_plate);
+    free(test);
 }
 
 double get_seconds()
@@ -113,7 +184,7 @@ void initialize(int size, float plate[size][size])
     set_static_cells(size, plate);
 }
 
-void initialize_test_cells(int size, int test[size][size])
+void initialize_test_cells(int size, char test[size][size])
 {
     int row, col;
     
@@ -151,65 +222,11 @@ void set_static_cells(int size, float plate[size][size])
     }
 }
 
-
-void swap(float** current, float** next)
-{
-    float* temp = *current;
-    *current = *next;
-    *next = temp;
-}
-
-
-void next_iteration(int size, float current[size][size], float next[size][size])
-{
-    int row, col;
-    
-    #pragma omp parallel for private(col)
-    for(row = 1; row < size - 1; row++)
-    {
-        float* top = current[row - 1];
-        float* curr = current[row];
-        float* bottom = current[row + 1];
-        for(col = 1; col < size - 1; col++)
-        {
-            next[row][col] = (top[col] + bottom[col] + 
-                              curr[col - 1] + curr[col + 1] + 
-                              4.0*curr[col])/8.0f; 
-        }
-    }
-    
-    set_static_cells(size, next);
-}
-
-int has_converged(int size, float plate[size][size], float error, int test[size][size])
+int has_converged(int size, float plate[size][size], float error, char test[size][size])
 {
     int row, col;
     int converged = 1;
-    
-    for(row = 1; row < size - 1; row++)
-    {
-        for(col = 1; col < size - 1; col++)
-        {
-            if(!test[row][col])
-            {
-                float average = (plate[row - 1][col] + plate[row + 1][col] + 
-                                 plate[row][col - 1] + plate[row][col + 1])/4.0f;
-                           
-                
-                float difference = fabsf(plate[row][col] - average);
-                
-                /*printf("Avg: %f", average);
-                printf("Val: %f", plate[row][col]);
-                printf("Dif: %f", difference);*/
-                    
-                if(difference >= error)
-                {
-                    converged = 0;
-                    break;
-                }
-            }
-        }
-    }
+
     
     return converged;
 }
@@ -245,4 +262,28 @@ int count_cells_by_degrees(int size, float plate[size][size], float temp)
     }
     
     return count;
+}
+
+inline void swap(float** current, float** next)
+{
+    float* temp = *current;
+    *current = *next;
+    *next = temp;
+}
+
+void compute(int size, float current[size][size], float next[size][size])
+{
+    int row, col;
+    
+#pragma omp for schedule(dynamic) private(col) nowait
+    for(row = 1; row < size - 1; row++)
+    {
+        float* top = current[row+1];
+        float* curr = current[row];
+        float* bottom = current[row-1];
+        for(col = 1; col < size - 1; col++)
+        {
+            next[row][col] = (bottom[col] + top[col] + curr[col - 1] + curr[col + 1] + 4.0f*curr[col])/8.0f;
+        }
+    }
 }
